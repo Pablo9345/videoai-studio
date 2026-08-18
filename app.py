@@ -61,7 +61,8 @@ def cargar_db():
         ],
         "config": {
             "grok_api_key": "",  # Aquí pondrás tu API
-            "whisper_model": "base"
+            "whisper_model": "base",
+            "admin_password": "admin123"   # Contraseña para entrar como admin
         }
     }
 
@@ -571,4 +572,30 @@ def panel_admin():
                 st.json(p['json'])
 
 if __name__ == "__main__":
-    main()
+    # Inicializar estado de sesión para modo admin
+    if 'admin_mode' not in st.session_state:
+        st.session_state.admin_mode = False
+
+    # Sidebar para acceso admin
+    with st.sidebar:
+        if not st.session_state.admin_mode:
+            with st.expander("🔐 Modo Admin"):
+                admin_pass = st.text_input("Contraseña admin", type="password")
+                if st.button("Ingresar como Admin"):
+                    db = cargar_db()
+                    if admin_pass == db["config"].get("admin_password", "admin123"):
+                        st.session_state.admin_mode = True
+                        st.success("Modo admin activado")
+                        st.rerun()
+                    else:
+                        st.error("Contraseña incorrecta")
+        else:
+            if st.button("Salir de modo admin"):
+                st.session_state.admin_mode = False
+                st.rerun()
+
+    # Mostrar panel de admin o interfaz de usuario
+    if st.session_state.admin_mode:
+        panel_admin()
+    else:
+        main()
