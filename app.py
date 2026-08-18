@@ -60,10 +60,10 @@ def cargar_db():
             }
         ],
         "config": {
-            "xai_api_key": "",          # ← Tu API key de xAI
-            "xai_model": "grok-2-latest",  # Modelo por defecto
+            "groq_api_key": "",              # ← Tu API key de Groq
+            "groq_model": "llama-3.1-70b-versatile",  # Modelo por defecto
             "whisper_model": "base",
-            "admin_password": "admin123"   # Contraseña para entrar como admin
+            "admin_password": "admin123"     # Contraseña para entrar como admin
         }
     }
 
@@ -71,12 +71,12 @@ def guardar_db(data):
     with open(DB_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-# ============ CLASE DE IA (X.AI / GROK) ============
-class XAI:
-    def __init__(self, api_key, model="grok-2-latest"):
+# ============ CLASE DE IA (GROQ) ============
+class GroqAI:
+    def __init__(self, api_key, model="llama-3.1-70b-versatile"):
         self.api_key = api_key
         self.model = model
-        self.base_url = "https://api.x.ai/v1"
+        self.base_url = "https://api.groq.com/openai/v1"
         self.headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
@@ -88,7 +88,6 @@ class XAI:
             response = requests.get(f"{self.base_url}/models", headers=self.headers, timeout=15)
             if response.status_code == 200:
                 data = response.json()
-                # La respuesta suele ser {"data": [{"id": "..."}, ...]}
                 if "data" in data:
                     return [m["id"] for m in data["data"]]
                 else:
@@ -429,31 +428,31 @@ def panel_admin():
     st.sidebar.title("🔑 Panel Admin")
     db = cargar_db()
 
-    # Configuración de xAI
-    with st.sidebar.expander("🔑 API de xAI"):
-        api_key = st.text_input("API Key", value=db["config"].get("xai_api_key", ""), type="password")
+    # Configuración de Groq
+    with st.sidebar.expander("🔑 API de Groq"):
+        api_key = st.text_input("API Key", value=db["config"].get("groq_api_key", ""), type="password")
         if st.button("Guardar API"):
-            db["config"]["xai_api_key"] = api_key
+            db["config"]["groq_api_key"] = api_key
             guardar_db(db)
             st.success("API guardada")
 
         if st.button("Listar modelos disponibles"):
-            if db["config"]["xai_api_key"]:
-                xai = XAI(db["config"]["xai_api_key"])
-                modelos = xai.listar_modelos()
+            if db["config"]["groq_api_key"]:
+                groq = GroqAI(db["config"]["groq_api_key"])
+                modelos = groq.listar_modelos()
                 if isinstance(modelos, list):
-                    st.session_state["modelos_xai"] = modelos
+                    st.session_state["modelos_groq"] = modelos
                     st.success(f"Se encontraron {len(modelos)} modelos")
                 else:
                     st.error(modelos.get("error", "Error al listar modelos"))
             else:
                 st.warning("Primero guarda tu API key")
 
-        if "modelos_xai" in st.session_state:
+        if "modelos_groq" in st.session_state:
             st.write("Modelos disponibles:")
-            modelo_seleccionado = st.selectbox("Selecciona modelo", st.session_state["modelos_xai"])
+            modelo_seleccionado = st.selectbox("Selecciona modelo", st.session_state["modelos_groq"])
             if st.button("Guardar modelo"):
-                db["config"]["xai_model"] = modelo_seleccionado
+                db["config"]["groq_model"] = modelo_seleccionado
                 guardar_db(db)
                 st.success("Modelo guardado")
 
@@ -499,9 +498,9 @@ def panel_admin():
             descripcion = st.text_area("Descripción")
             estilo = st.selectbox("Estilo", ["Moderno", "Minimalista", "Corporativo", "Creativo"])
             if st.button("Generar Plantilla con IA"):
-                if db["config"]["xai_api_key"]:
-                    xai = XAI(db["config"]["xai_api_key"], model=db["config"].get("xai_model", "grok-2-latest"))
-                    resultado = xai.generar_plantilla(tipo, descripcion, estilo)
+                if db["config"]["groq_api_key"]:
+                    groq = GroqAI(db["config"]["groq_api_key"], model=db["config"].get("groq_model", "llama-3.1-70b-versatile"))
+                    resultado = groq.generar_plantilla(tipo, descripcion, estilo)
                     if "error" in resultado:
                         st.error(f"Error al generar: {resultado['error']}")
                     else:
@@ -518,7 +517,7 @@ def panel_admin():
                         st.success("Plantilla creada!")
                         st.rerun()
                 else:
-                    st.error("Configura primero la API de xAI")
+                    st.error("Configura primero la API de Groq")
         st.subheader("Plantillas existentes")
         for p in db["plantillas"]:
             with st.expander(f"📁 {p['nombre']}"):
