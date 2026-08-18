@@ -60,7 +60,7 @@ def cargar_db():
             }
         ],
         "config": {
-            "grok_api_key": "",  # Aquí pondrás tu API
+            "groq_api_key": "",  # ← Tu API key de Groq
             "whisper_model": "base",
             "admin_password": "admin123"   # Contraseña para entrar como admin
         }
@@ -70,11 +70,11 @@ def guardar_db(data):
     with open(DB_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-# ============ CLASE DE IA (GROK) ============
-class GrokAI:
+# ============ CLASE DE IA (GROQ) ============
+class GroqAI:
     def __init__(self, api_key):
         self.api_key = api_key
-        self.url = "https://api.x.ai/v1/chat/completions"
+        self.url = "https://api.groq.com/openai/v1/chat/completions"
         self.headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
@@ -124,7 +124,7 @@ class GrokAI:
     def _consultar(self, prompt):
         try:
             data = {
-                "model": "grok-2-1212",
+                "model": "llama-3.3-70b-versatile",  # ← Modelo de Groq
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.7,
                 "max_tokens": 2000
@@ -482,11 +482,11 @@ def panel_admin():
     
     db = cargar_db()
     
-    # Configurar API de Grok
-    with st.sidebar.expander("🔑 API de Grok"):
-        api_key = st.text_input("API Key", value=db["config"].get("grok_api_key", ""), type="password")
+    # Configurar API de Groq
+    with st.sidebar.expander("🔑 API de Groq"):
+        api_key = st.text_input("API Key", value=db["config"].get("groq_api_key", ""), type="password")
         if st.button("Guardar API"):
-            db["config"]["grok_api_key"] = api_key
+            db["config"]["groq_api_key"] = api_key
             guardar_db(db)
             st.success("API guardada")
     
@@ -543,9 +543,9 @@ def panel_admin():
             estilo = st.selectbox("Estilo", ["Moderno", "Minimalista", "Corporativo", "Creativo"])
             
             if st.button("Generar Plantilla con IA"):
-                if db["config"]["grok_api_key"]:
-                    grok = GrokAI(db["config"]["grok_api_key"])
-                    resultado = grok.generar_plantilla(tipo, descripcion, estilo)
+                if db["config"]["groq_api_key"]:
+                    groq = GroqAI(db["config"]["groq_api_key"])
+                    resultado = groq.generar_plantilla(tipo, descripcion, estilo)
                     
                     plantilla = {
                         "id": str(uuid.uuid4()),
@@ -561,7 +561,7 @@ def panel_admin():
                     st.success("Plantilla creada!")
                     st.rerun()
                 else:
-                    st.error("Configura primero la API de Grok")
+                    st.error("Configura primero la API de Groq")
         
         # Mostrar plantillas
         st.subheader("Plantillas existentes")
