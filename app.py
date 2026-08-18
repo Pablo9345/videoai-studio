@@ -4,6 +4,7 @@ import subprocess
 import json
 import uuid
 import requests
+import re
 from pathlib import Path
 from datetime import datetime, timedelta
 import hashlib
@@ -60,10 +61,10 @@ def cargar_db():
             }
         ],
         "config": {
-            "groq_api_key": "",              # ← Tu API key de Groq
-            "groq_model": "llama-3.1-70b-versatile",  # Modelo por defecto
+            "groq_api_key": "",
+            "groq_model": "llama-3.1-70b-versatile",
             "whisper_model": "base",
-            "admin_password": "admin123"     # Contraseña para entrar como admin
+            "admin_password": "admin123"
         }
     }
 
@@ -83,7 +84,6 @@ class GroqAI:
         }
 
     def listar_modelos(self):
-        """Obtiene la lista de modelos disponibles para la API key"""
         try:
             response = requests.get(f"{self.base_url}/models", headers=self.headers, timeout=15)
             if response.status_code == 200:
@@ -97,8 +97,26 @@ class GroqAI:
         except Exception as e:
             return {"error": str(e)}
 
+    def _limpiar_json(self, texto):
+        # Eliminar bloques de código markdown
+        texto = re.sub(r'```json\s*|\s*```', '', texto)
+        # Eliminar etiquetas <think> ... </think>
+        texto = re.sub(r'<think>.*?</think>', '', texto, flags=re.DOTALL)
+        # Buscar el primer { o [ y extraer JSON completo
+        start = min([i for i in (texto.find('{'), texto.find('[')) if i != -1] or [-1])
+        if start != -1:
+            stack = []
+            for i, ch in enumerate(texto[start:], start):
+                if ch in '{[':
+                    stack.append(ch)
+                elif ch in '}]':
+                    if stack and ((ch == '}' and stack[-1] == '{') or (ch == ']' and stack[-1] == '[')):
+                        stack.pop()
+                        if not stack:
+                            return texto[start:i+1]
+        return texto
+
     def generar_plantilla(self, tipo_video, descripcion, estilo):
-        """Genera una plantilla JSON completa"""
         prompt = f"""
         Crea una plantilla de edición de video en JSON.
         
@@ -116,10 +134,14 @@ class GroqAI:
         
         Responde SOLO con JSON válido.
         """
-        return self._consultar(prompt)
+        resultado = self._consultar(prompt)
+        resultado_limpio = self._limpiar_json(resultado)
+        try:
+            return json.loads(resultado_limpio)
+        except:
+            return {"error": "No se pudo parsear JSON", "raw": resultado}
 
     def analizar_video(self, transcripcion, tipo_contenido):
-        """Analiza el video y genera metadata completa"""
         prompt = f"""
         Analiza este video de tipo "{tipo_contenido}" y genera:
         1. Título atractivo para YouTube (máx 60 caracteres)
@@ -134,7 +156,12 @@ class GroqAI:
         
         Responde SOLO con JSON válido.
         """
-        return self._consultar(prompt)
+        resultado = self._consultar(prompt)
+        resultado_limpio = self._limpiar_json(resultado)
+        try:
+            return json.loads(resultado_limpio)
+        except:
+            return {"error": "No se pudo parsear JSON", "raw": resultado}
 
     def _consultar(self, prompt):
         try:
@@ -157,7 +184,7 @@ class GroqAI:
         except Exception as e:
             return {"error": str(e)}
 
-# ============ SISTEMA DE AUTENTICACIÓN ============
+# ============ AUTENTICACIÓN ============
 def crear_hash(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
@@ -428,7 +455,6 @@ def panel_admin():
     st.sidebar.title("🔑 Panel Admin")
     db = cargar_db()
 
-    # Configuración de Groq
     with st.sidebar.expander("🔑 API de Groq"):
         api_key = st.text_input("API Key", value=db["config"].get("groq_api_key", ""), type="password")
         if st.button("Guardar API"):
@@ -492,6 +518,14 @@ def panel_admin():
 
     elif admin_vista == "🎨 Plantillas":
         st.title("🎨 Gestión de Plantillas")
+
+        def eliminar_plantilla(plantilla_id):
+            db = cargar_db()
+            db["plantillas"] = [p for p in db["plantillas"] if p["id"] != plantilla_id]
+            guardar_db(db)
+            st.success("Plantilla eliminada")
+            st.rerun()
+
         with st.expander("➕ Nueva Plantilla"):
             nombre = st.text_input("Nombre de plantilla")
             tipo = st.selectbox("Tipo", ["Tutorial", "Vlog", "Shorts", "Corporativo"])
@@ -518,12 +552,17 @@ def panel_admin():
                         st.rerun()
                 else:
                     st.error("Configura primero la API de Groq")
+
         st.subheader("Plantillas existentes")
+        if not db["plantillas"]:
+            st.info("No hay plantillas aún.")
         for p in db["plantillas"]:
             with st.expander(f"📁 {p['nombre']}"):
                 st.write(f"**Tipo:** {p['tipo']}")
                 st.write(f"**Descripción:** {p['descripcion']}")
                 st.json(p['json'])
+                if st.button(f"🗑️ Eliminar {p['nombre']}", key=f"eliminar_{p['id']}"):
+                    eliminar_plantilla(p["id"])
 
 if __name__ == "__main__":
     if 'admin_mode' not in st.session_state:
