@@ -60,7 +60,8 @@ def cargar_db():
             }
         ],
         "config": {
-            "groq_api_key": "",  # ← Tu API key de Groq
+            "xai_api_key": "",          # ← Tu API key de xAI
+            "xai_model": "grok-2-latest",  # Modelo por defecto
             "whisper_model": "base",
             "admin_password": "admin123"   # Contraseña para entrar como admin
         }
@@ -70,35 +71,33 @@ def guardar_db(data):
     with open(DB_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-# ============ CLASE DE IA (GROQ) ============
-class GroqAI:
-    def __init__(self, api_key):
+# ============ CLASE DE IA (X.AI / GROK) ============
+class XAI:
+    def __init__(self, api_key, model="grok-2-latest"):
         self.api_key = api_key
-        self.url = "https://api.groq.com/openai/v1/chat/completions"
+        self.model = model
+        self.base_url = "https://api.x.ai/v1"
         self.headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
-    
-    def analizar_video(self, transcripcion, tipo_contenido):
-        """Analiza el video y genera metadata completa"""
-        prompt = f"""
-        Analiza este video de tipo "{tipo_contenido}" y genera:
-        1. Título atractivo para YouTube (máx 60 caracteres)
-        2. Descripción optimizada para SEO (100-150 palabras)
-        3. 10 hashtags relevantes
-        4. 3 momentos más importantes (con timestamps aproximados)
-        5. Resumen de 2 oraciones
-        6. Sugerencia de miniaturas (3 ideas)
-        
-        Transcripción:
-        {transcripcion[:4000]}
-        
-        Responde SOLO con JSON válido.
-        """
-        
-        return self._consultar(prompt)
-    
+
+    def listar_modelos(self):
+        """Obtiene la lista de modelos disponibles para la API key"""
+        try:
+            response = requests.get(f"{self.base_url}/models", headers=self.headers, timeout=15)
+            if response.status_code == 200:
+                data = response.json()
+                # La respuesta suele ser {"data": [{"id": "..."}, ...]}
+                if "data" in data:
+                    return [m["id"] for m in data["data"]]
+                else:
+                    return list(data.keys())
+            else:
+                return {"error": f"Error {response.status_code}: {response.text}"}
+        except Exception as e:
+            return {"error": str(e)}
+
     def generar_plantilla(self, tipo_video, descripcion, estilo):
         """Genera una plantilla JSON completa"""
         prompt = f"""
@@ -118,18 +117,40 @@ class GroqAI:
         
         Responde SOLO con JSON válido.
         """
-        
         return self._consultar(prompt)
-    
+
+    def analizar_video(self, transcripcion, tipo_contenido):
+        """Analiza el video y genera metadata completa"""
+        prompt = f"""
+        Analiza este video de tipo "{tipo_contenido}" y genera:
+        1. Título atractivo para YouTube (máx 60 caracteres)
+        2. Descripción optimizada para SEO (100-150 palabras)
+        3. 10 hashtags relevantes
+        4. 3 momentos más importantes (con timestamps aproximados)
+        5. Resumen de 2 oraciones
+        6. Sugerencia de miniaturas (3 ideas)
+        
+        Transcripción:
+        {transcripcion[:4000]}
+        
+        Responde SOLO con JSON válido.
+        """
+        return self._consultar(prompt)
+
     def _consultar(self, prompt):
         try:
             data = {
-                "model": "llama-3.3-70b-versatile",  # ← Modelo de Groq
+                "model": self.model,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.7,
                 "max_tokens": 2000
             }
-            response = requests.post(self.url, headers=self.headers, json=data, timeout=30)
+            response = requests.post(
+                f"{self.base_url}/chat/completions",
+                headers=self.headers,
+                json=data,
+                timeout=30
+            )
             if response.status_code == 200:
                 return response.json()["choices"][0]["message"]["content"]
             else:
@@ -143,12 +164,9 @@ def crear_hash(password):
 
 def registrar_usuario(nombre, email, password, plan="gratis"):
     db = cargar_db()
-    
-    # Verificar si existe
     for u in db["usuarios"]:
         if u["email"] == email:
             return None, "El email ya está registrado"
-    
     usuario = {
         "id": str(uuid.uuid4()),
         "nombre": nombre,
@@ -160,7 +178,6 @@ def registrar_usuario(nombre, email, password, plan="gratis"):
         "fecha_registro": datetime.now().isoformat(),
         "activo": True
     }
-    
     db["usuarios"].append(usuario)
     guardar_db(db)
     return usuario, "Usuario creado exitosamente"
@@ -168,11 +185,9 @@ def registrar_usuario(nombre, email, password, plan="gratis"):
 def login_usuario(email, password):
     db = cargar_db()
     hash_password = crear_hash(password)
-    
     for u in db["usuarios"]:
         if u["email"] == email and u["password_hash"] == hash_password:
             return u, "Login exitoso"
-    
     return None, "Credenciales incorrectas"
 
 def verificar_tokens(usuario_id):
@@ -193,23 +208,19 @@ def usar_token(usuario_id):
 
 # ============ PROCESAMIENTO DE VIDEO ============
 def procesar_video_automatico(ruta_video, plantilla_json, config):
-    """Procesa el video con FFmpeg según la plantilla"""
     try:
-        # 1. Transcripción
         import whisper
         modelo = whisper.load_model(config.get("whisper_model", "base"))
         transcripcion = modelo.transcribe(ruta_video, fp16=False)
-        
-        # 2. Detectar silencios
+
         from pydub import AudioSegment
         from pydub.silence import detect_silence
         audio = AudioSegment.from_file(ruta_video)
         silencios = detect_silence(audio, min_silence_len=1000, silence_thresh=-45)
-        
-        # 3. Cortar silencios
+
         temp_dir = OUTPUTS / str(uuid.uuid4())
         temp_dir.mkdir(parents=True, exist_ok=True)
-        
+
         segmentos = []
         inicio = 0.0
         for i, (s_inicio, s_fin) in enumerate(silencios):
@@ -225,8 +236,7 @@ def procesar_video_automatico(ruta_video, plantilla_json, config):
                 ], capture_output=True)
                 segmentos.append(str(seg))
             inicio = s_fin
-        
-        # Último segmento
+
         seg = temp_dir / "seg_final.mp4"
         subprocess.run([
             "ffmpeg", "-ss", str(inicio), "-i", ruta_video,
@@ -234,20 +244,18 @@ def procesar_video_automatico(ruta_video, plantilla_json, config):
             "-crf", "23", str(seg)
         ], capture_output=True)
         segmentos.append(str(seg))
-        
-        # 4. Concatenar
+
         lista = temp_dir / "lista.txt"
         with open(lista, 'w') as f:
             for s in segmentos:
                 f.write(f"file '{s}'\n")
-        
+
         video_final = OUTPUTS / f"final_{uuid.uuid4()}.mp4"
         subprocess.run([
             "ffmpeg", "-f", "concat", "-safe", "0", "-i", str(lista),
             "-c", "copy", str(video_final)
         ], capture_output=True)
-        
-        # 5. Generar subtítulos
+
         srt_content = ""
         for i, segm in enumerate(transcripcion["segments"], 1):
             def f_t(s):
@@ -256,64 +264,53 @@ def procesar_video_automatico(ruta_video, plantilla_json, config):
                 sec = int(s % 60)
                 ms = int((s - int(s)) * 1000)
                 return f"{h:02d}:{m:02d}:{sec:02d},{ms:03d}"
-            
             srt_content += f"{i}\n{f_t(segm['start'])} --> {f_t(segm['end'])}\n{segm['text'].strip()}\n\n"
-        
+
         ruta_srt = OUTPUTS / f"subtitulos_{uuid.uuid4()}.srt"
         with open(ruta_srt, 'w', encoding='utf-8') as f:
             f.write(srt_content)
-        
+
         return {
             "video_final": str(video_final),
             "subtitulos": str(ruta_srt),
             "transcripcion": transcripcion["text"],
             "segmentos": len(segmentos)
         }
-    
     except Exception as e:
         return {"error": str(e)}
 
 # ============ INTERFAZ PRINCIPAL ============
 def main():
-    # Inicializar estado de sesión
     if 'usuario' not in st.session_state:
         st.session_state.usuario = None
     if 'vista' not in st.session_state:
         st.session_state.vista = "login"
-    
-    # Sidebar
+
     with st.sidebar:
         st.title("🎬 VideoAI Studio")
         st.markdown("---")
-        
         if st.session_state.usuario:
             st.write(f"👤 **{st.session_state.usuario['nombre']}**")
             st.write(f"📧 {st.session_state.usuario['email']}")
             st.write(f"🎯 Plan: {st.session_state.usuario['plan'].upper()}")
             st.write(f"🪙 Tokens: {st.session_state.usuario['tokens']}")
             st.markdown("---")
-            
             vista = st.radio(
                 "Navegación",
                 ["📤 Procesar Video", "🎨 Plantillas", "📊 Mis Proyectos", "⚙️ Configuración"]
             )
-            
             if st.button("🚪 Cerrar Sesión"):
                 st.session_state.usuario = None
                 st.rerun()
         else:
             st.info("Inicia sesión para continuar")
-    
-    # Vista principal
+
     if not st.session_state.usuario:
-        # Login/Registro
         tab1, tab2 = st.tabs(["🔐 Iniciar Sesión", "📝 Registrarse"])
-        
         with tab1:
             st.header("Iniciar Sesión")
             email = st.text_input("Email", key="login_email")
             password = st.text_input("Password", type="password", key="login_password")
-            
             if st.button("Entrar", type="primary"):
                 usuario, msg = login_usuario(email, password)
                 if usuario:
@@ -322,14 +319,12 @@ def main():
                     st.rerun()
                 else:
                     st.error(msg)
-        
         with tab2:
             st.header("Crear Cuenta")
             nombre = st.text_input("Nombre", key="reg_nombre")
             email = st.text_input("Email", key="reg_email")
             password = st.text_input("Password", type="password", key="reg_password")
             password2 = st.text_input("Confirmar Password", type="password", key="reg_password2")
-            
             if st.button("Registrarse", type="primary"):
                 if password != password2:
                     st.error("Las contraseñas no coinciden")
@@ -341,67 +336,41 @@ def main():
                         st.rerun()
                     else:
                         st.error(msg)
-    
     else:
         if vista == "📤 Procesar Video":
             st.title("📤 Procesar Video Automáticamente")
-            
             if st.session_state.usuario['tokens'] <= 0:
                 st.warning("⚠️ No tienes tokens disponibles. Actualiza tu plan.")
             else:
-                video_subido = st.file_uploader(
-                    "Sube tu video",
-                    type=['mp4', 'mov', 'avi', 'mkv']
-                )
-                
+                video_subido = st.file_uploader("Sube tu video", type=['mp4','mov','avi','mkv'])
                 if video_subido:
                     st.video(video_subido)
-                    
                     col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.info(f"**Archivo:** {video_subido.name}")
-                    with col2:
-                        st.info(f"**Tamaño:** {video_subido.size/1024/1024:.1f} MB")
-                    with col3:
-                        st.info(f"**Tokens:** 1")
-                    
-                    # Seleccionar plantilla
+                    col1.info(f"**Archivo:** {video_subido.name}")
+                    col2.info(f"**Tamaño:** {video_subido.size/1024/1024:.1f} MB")
+                    col3.info(f"**Tokens:** 1")
                     db = cargar_db()
                     plantillas = db["plantillas"]
-                    
                     if plantillas:
-                        plantilla_sel = st.selectbox(
-                            "Elige una plantilla",
-                            [p["nombre"] for p in plantillas]
-                        )
+                        plantilla_sel = st.selectbox("Elige una plantilla", [p["nombre"] for p in plantillas])
                     else:
                         st.info("No hay plantillas disponibles. El admin debe crearlas.")
                         plantilla_sel = None
-                    
-                    # Configuración
                     with st.expander("⚙️ Configuración avanzada"):
                         eliminar_silencios = st.checkbox("Eliminar silencios", True)
                         generar_subs = st.checkbox("Generar subtítulos", True)
                         calidad = st.selectbox("Calidad", ["720p", "1080p"])
-                    
                     if st.button("🚀 Procesar Video", type="primary"):
                         if verificar_tokens(st.session_state.usuario['id']):
                             with st.spinner("Procesando video... Esto puede tardar unos minutos"):
-                                # Guardar video
                                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                                 ruta_video = UPLOADS / f"{timestamp}_{video_subido.name}"
                                 with open(ruta_video, 'wb') as f:
                                     f.write(video_subido.getbuffer())
-                                
-                                # Procesar
                                 config = {"whisper_model": "base"}
                                 resultado = procesar_video_automatico(str(ruta_video), plantilla_sel, config)
-                                
                                 if "error" not in resultado:
-                                    # Usar token
                                     usar_token(st.session_state.usuario['id'])
-                                    
-                                    # Guardar proyecto
                                     db = cargar_db()
                                     for u in db["usuarios"]:
                                         if u["id"] == st.session_state.usuario['id']:
@@ -415,54 +384,34 @@ def main():
                                             u["tokens"] -= 1
                                             st.session_state.usuario = u
                                     guardar_db(db)
-                                    
                                     st.success("✅ Video procesado exitosamente!")
-                                    
-                                    # Mostrar resultado
                                     st.video(resultado["video_final"])
-                                    
                                     col1, col2 = st.columns(2)
                                     with col1:
                                         with open(resultado["video_final"], 'rb') as f:
-                                            st.download_button(
-                                                "⬇️ Descargar Video",
-                                                f,
-                                                file_name=f"editado_{timestamp}.mp4",
-                                                mime="video/mp4"
-                                            )
+                                            st.download_button("⬇️ Descargar Video", f, file_name=f"editado_{timestamp}.mp4", mime="video/mp4")
                                     with col2:
                                         if generar_subs:
                                             with open(resultado["subtitulos"], 'rb') as f:
-                                                st.download_button(
-                                                    "⬇️ Descargar Subtítulos",
-                                                    f,
-                                                    file_name=f"subtitulos_{timestamp}.srt"
-                                                )
-                                    
-                                    # Mostrar transcripción
+                                                st.download_button("⬇️ Descargar Subtítulos", f, file_name=f"subtitulos_{timestamp}.srt")
                                     with st.expander("📝 Ver transcripción"):
                                         st.write(resultado["transcripcion"])
                                 else:
                                     st.error(f"Error: {resultado['error']}")
                         else:
                             st.error("No tienes tokens suficientes")
-        
         elif vista == "🎨 Plantillas":
             st.title("🎨 Plantillas Disponibles")
-            
             db = cargar_db()
             plantillas = db["plantillas"]
-            
             if not plantillas:
                 st.info("El administrador aún no ha creado plantillas.")
             else:
                 for p in plantillas:
                     with st.expander(f"📁 {p['nombre']}"):
                         st.json(p)
-        
         elif vista == "📊 Mis Proyectos":
             st.title("📊 Mis Proyectos")
-            
             if st.session_state.usuario['proyectos']:
                 for proyecto in reversed(st.session_state.usuario['proyectos']):
                     with st.expander(f"Proyecto {proyecto['fecha']}"):
@@ -471,7 +420,6 @@ def main():
                             st.write(f"**Transcripción:** {proyecto['transcripcion']}...")
             else:
                 st.info("Aún no tienes proyectos procesados.")
-        
         elif vista == "⚙️ Configuración":
             st.title("⚙️ Configuración")
             st.json(st.session_state.usuario)
@@ -479,46 +427,57 @@ def main():
 # ============ ADMINISTRADOR ============
 def panel_admin():
     st.sidebar.title("🔑 Panel Admin")
-    
     db = cargar_db()
-    
-    # Configurar API de Groq
-    with st.sidebar.expander("🔑 API de Groq"):
-        api_key = st.text_input("API Key", value=db["config"].get("groq_api_key", ""), type="password")
+
+    # Configuración de xAI
+    with st.sidebar.expander("🔑 API de xAI"):
+        api_key = st.text_input("API Key", value=db["config"].get("xai_api_key", ""), type="password")
         if st.button("Guardar API"):
-            db["config"]["groq_api_key"] = api_key
+            db["config"]["xai_api_key"] = api_key
             guardar_db(db)
             st.success("API guardada")
-    
+
+        if st.button("Listar modelos disponibles"):
+            if db["config"]["xai_api_key"]:
+                xai = XAI(db["config"]["xai_api_key"])
+                modelos = xai.listar_modelos()
+                if isinstance(modelos, list):
+                    st.session_state["modelos_xai"] = modelos
+                    st.success(f"Se encontraron {len(modelos)} modelos")
+                else:
+                    st.error(modelos.get("error", "Error al listar modelos"))
+            else:
+                st.warning("Primero guarda tu API key")
+
+        if "modelos_xai" in st.session_state:
+            st.write("Modelos disponibles:")
+            modelo_seleccionado = st.selectbox("Selecciona modelo", st.session_state["modelos_xai"])
+            if st.button("Guardar modelo"):
+                db["config"]["xai_model"] = modelo_seleccionado
+                guardar_db(db)
+                st.success("Modelo guardado")
+
     admin_vista = st.sidebar.radio(
         "Admin",
         ["📊 Dashboard", "👥 Usuarios", "🎨 Plantillas", "💰 Membresías"]
     )
-    
+
     if admin_vista == "📊 Dashboard":
         st.title("📊 Dashboard")
-        
         col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Usuarios", len(db["usuarios"]))
-        with col2:
-            st.metric("Plantillas", len(db["plantillas"]))
-        with col3:
-            st.metric("Membresías", len(db["membresias"]))
-        with col4:
-            total_tokens = sum(u["tokens"] for u in db["usuarios"])
-            st.metric("Tokens activos", total_tokens)
-    
+        col1.metric("Usuarios", len(db["usuarios"]))
+        col2.metric("Plantillas", len(db["plantillas"]))
+        col3.metric("Membresías", len(db["membresias"]))
+        col4.metric("Tokens activos", sum(u["tokens"] for u in db["usuarios"]))
+
     elif admin_vista == "👥 Usuarios":
         st.title("👥 Gestión de Usuarios")
-        
         for u in db["usuarios"]:
             with st.expander(f"👤 {u['nombre']} - {u['email']}"):
                 st.write(f"**Plan:** {u['plan']}")
                 st.write(f"**Tokens:** {u['tokens']}")
                 st.write(f"**Proyectos:** {len(u['proyectos'])}")
                 st.write(f"**Registro:** {u['fecha_registro']}")
-                
                 col1, col2 = st.columns(2)
                 with col1:
                     tokens_add = st.number_input(f"Tokens a añadir {u['id']}", 1, 100, 10, key=f"tokens_{u['id']}")
@@ -531,39 +490,35 @@ def panel_admin():
                         u["activo"] = False
                         guardar_db(db)
                         st.rerun()
-    
+
     elif admin_vista == "🎨 Plantillas":
         st.title("🎨 Gestión de Plantillas")
-        
-        # Crear plantilla
         with st.expander("➕ Nueva Plantilla"):
             nombre = st.text_input("Nombre de plantilla")
             tipo = st.selectbox("Tipo", ["Tutorial", "Vlog", "Shorts", "Corporativo"])
             descripcion = st.text_area("Descripción")
             estilo = st.selectbox("Estilo", ["Moderno", "Minimalista", "Corporativo", "Creativo"])
-            
             if st.button("Generar Plantilla con IA"):
-                if db["config"]["groq_api_key"]:
-                    groq = GroqAI(db["config"]["groq_api_key"])
-                    resultado = groq.generar_plantilla(tipo, descripcion, estilo)
-                    
-                    plantilla = {
-                        "id": str(uuid.uuid4()),
-                        "nombre": nombre,
-                        "tipo": tipo,
-                        "descripcion": descripcion,
-                        "json": resultado,
-                        "fecha_creacion": datetime.now().isoformat()
-                    }
-                    
-                    db["plantillas"].append(plantilla)
-                    guardar_db(db)
-                    st.success("Plantilla creada!")
-                    st.rerun()
+                if db["config"]["xai_api_key"]:
+                    xai = XAI(db["config"]["xai_api_key"], model=db["config"].get("xai_model", "grok-2-latest"))
+                    resultado = xai.generar_plantilla(tipo, descripcion, estilo)
+                    if "error" in resultado:
+                        st.error(f"Error al generar: {resultado['error']}")
+                    else:
+                        plantilla = {
+                            "id": str(uuid.uuid4()),
+                            "nombre": nombre,
+                            "tipo": tipo,
+                            "descripcion": descripcion,
+                            "json": resultado,
+                            "fecha_creacion": datetime.now().isoformat()
+                        }
+                        db["plantillas"].append(plantilla)
+                        guardar_db(db)
+                        st.success("Plantilla creada!")
+                        st.rerun()
                 else:
-                    st.error("Configura primero la API de Groq")
-        
-        # Mostrar plantillas
+                    st.error("Configura primero la API de xAI")
         st.subheader("Plantillas existentes")
         for p in db["plantillas"]:
             with st.expander(f"📁 {p['nombre']}"):
@@ -572,11 +527,9 @@ def panel_admin():
                 st.json(p['json'])
 
 if __name__ == "__main__":
-    # Inicializar estado de sesión para modo admin
     if 'admin_mode' not in st.session_state:
         st.session_state.admin_mode = False
 
-    # Sidebar para acceso admin
     with st.sidebar:
         if not st.session_state.admin_mode:
             with st.expander("🔐 Modo Admin"):
@@ -594,7 +547,6 @@ if __name__ == "__main__":
                 st.session_state.admin_mode = False
                 st.rerun()
 
-    # Mostrar panel de admin o interfaz de usuario
     if st.session_state.admin_mode:
         panel_admin()
     else:
