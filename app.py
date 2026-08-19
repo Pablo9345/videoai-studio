@@ -5,7 +5,6 @@ import json
 import uuid
 import requests
 import re
-import base64
 from pathlib import Path
 from datetime import datetime
 import hashlib
@@ -117,8 +116,9 @@ class GroqAI:
         Devuelve JSON con:
         {{
             "titulo": "...",
+            "introduccion": "texto de introducción",
             "escenas": [
-                {{"numero": 1, "descripcion": "...", "texto_en_pantalla": "...", "imagen_sugerida": "...", "duracion_seg": 5}}
+                {{"numero": 1, "descripcion": "...", "texto_en_pantalla": "...", "imagen_sugerida": "", "duracion_seg": 5}}
             ],
             "cta_final": "..."
         }}
@@ -144,21 +144,6 @@ class GroqAI:
             return json.loads(limpio)
         except:
             return {"error": "No se pudo parsear JSON", "raw": resultado}
-
-# ============ GENERADOR DE IMÁGENES (POLLINATIONS - GRATIS) ============
-def generar_imagen(prompt, ancho=1280, alto=720):
-    url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(prompt)}?width={ancho}&height={alto}&nologo=true"
-    try:
-        r = requests.get(url, timeout=30)
-        if r.status_code == 200:
-            nombre = f"img_{uuid.uuid4()}.jpg"
-            ruta = IMAGENES_GENERADAS / nombre
-            with open(ruta, 'wb') as f:
-                f.write(r.content)
-            return str(ruta)
-        return None
-    except:
-        return None
 
 # ============ AUTENTICACIÓN ============
 def crear_hash(p):
@@ -223,24 +208,62 @@ def detectar_silencios_ffmpeg(ruta_video, umbral_db=-45, duracion_min=1.0):
                 pass
     return silencios
 
+# ============ FUNCIÓN PARA CREAR INTRO ============
+def crear_intro(titulo, plantilla, duracion=4, resolucion="1920x1080"):
+    color = plantilla.get("color_primario", "#3B82F6")
+    color_texto = "white"
+    # Crear un clip de color de fondo con texto
+    intro_path = OUTPUTS / f"intro_{uuid.uuid4()}.mp4"
+    # Usar drawtext para poner el título centrado
+    # Crear un video de color sólido con FFmpeg
+    cmd = [
+        "ffmpeg",
+        "-f", "lavfi",
+        "-i", f"color=c={color}:s={resolucion}:d={duracion}",
+        "-vf", f"drawtext=text='{titulo}':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:fontsize=60:fontcolor={color_texto}:x=(w-text_w)/2:y=(h-text_h)/2",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-c:a", "aac", "-ar", "44100", "-ac", "2",
+        str(intro_path)
+    ]
+    subprocess.run(cmd, capture_output=True)
+    return str(intro_path)
+
+# ============ FUNCIÓN PARA CREAR DIAPOSITIVA DE IMAGEN ============
+def crear_diapositiva_imagen(ruta_imagen, duracion=3, resolucion="1920x1080"):
+    slide_path = OUTPUTS / f"slide_{uuid.uuid4()}.mp4"
+    cmd = [
+        "ffmpeg", "-loop", "1", "-i", ruta_imagen,
+        "-t", str(duracion),
+        "-vf", f"scale={resolucion}:force_original_aspect_ratio=decrease,pad={resolucion}:(ow-iw)/2:(oh-ih)/2",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-c:a", "aac", "-ar", "44100", "-ac", "2",
+        str(slide_path)
+    ]
+    subprocess.run(cmd, capture_output=True)
+    return str(slide_path)
+
 # ============ PROCESAMIENTO PRINCIPAL ============
 def procesar_video_pro(ruta_video, guion, plantilla, config, archivos_extra):
     """
-    Procesa video(s) según guion y plantilla.
-    Incluye generación de imágenes automáticas, overlays de texto y transiciones.
+    Procesa video(s) según guion y plantilla, usando todo el material disponible.
     """
     try:
         import whisper
         modelo = whisper.load_model(config.get("whisper_model", "base"))
         transcripcion = modelo.transcribe(ruta_video, fp16=False)
 
-        # Detectar silencios
+        # Guardar videos extra
+        videos_extra = archivos_extra.get("videos", [])
+        imagenes = archivos_extra.get("imagenes", [])
+        audio_musica = archivos_extra.get("audio", None)
+
+        # Detectar silencios en video principal
         silencios = detectar_silencios_ffmpeg(ruta_video)
 
-        # Cortar segmentos útiles
+        # Cortar segmentos útiles del video principal
         temp_dir = OUTPUTS / str(uuid.uuid4())
         temp_dir.mkdir(parents=True, exist_ok=True)
-        segmentos = []
+        segmentos_principales = []
         inicio = 0.0
         for i, (s_ini, s_fin) in enumerate(silencios):
             if s_ini - inicio >= 2:
@@ -248,163 +271,216 @@ def procesar_video_pro(ruta_video, guion, plantilla, config, archivos_extra):
                 subprocess.run(["ffmpeg", "-ss", str(inicio), "-i", ruta_video,
                                 "-t", str(s_ini - inicio), "-c:v", "libx264",
                                 "-c:a", "aac", "-preset", "fast", "-crf", "23", str(seg)], capture_output=True)
-                segmentos.append(str(seg))
+                segmentos_principales.append(str(seg))
             inicio = s_fin
         seg = temp_dir / "seg_final.mp4"
         subprocess.run(["ffmpeg", "-ss", str(inicio), "-i", ruta_video,
                         "-c:v", "libx264", "-c:a", "aac", "-preset", "fast",
                         "-crf", "23", str(seg)], capture_output=True)
-        segmentos.append(str(seg))
+        segmentos_principales.append(str(seg))
 
-        # Generar imágenes automáticas si el guion lo sugiere
-        imagenes_generadas = []
-        if guion and "escenas" in guion:
-            for escena in guion["escenas"]:
-                if "imagen_sugerida" in escena and escena["imagen_sugerida"]:
-                    ruta_img = generar_imagen(escena["imagen_sugerida"])
-                    if ruta_img:
-                        # Crear una diapositiva de 3 segundos con la imagen
-                        slide = temp_dir / f"slide_{escena['numero']}.mp4"
-                        subprocess.run([
-                            "ffmpeg", "-loop", "1", "-i", ruta_img,
-                            "-t", "3", "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2",
-                            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-                            str(slide)
-                        ], capture_output=True)
-                        imagenes_generadas.append((escena["numero"], str(slide)))
+        # Crear lista de clips finales
+        clips_finales = []
 
-        # Aplicar overlay de título (primeros 3 segundos del primer segmento)
-        if guion and "titulo" in guion and plantilla:
-            titulo = guion["titulo"]
-            color = plantilla.get("color_primario", "#FFFFFF")
-            fuente = plantilla.get("fuente", "Arial")
-            # Reemplazar el primer segmento por uno con texto
-            primer_segmento = segmentos[0] if segmentos else None
-            if primer_segmento:
-                seg_con_titulo = temp_dir / "seg_0_titulo.mp4"
-                # Usar drawtext para superponer el título
-                cmd = [
-                    "ffmpeg", "-i", primer_segmento,
-                    "-vf", f"drawtext=text='{titulo}':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:fontsize=48:fontcolor={color}:x=(w-text_w)/2:y=(h-text_h)/2:enable='between(t,0,3)'",
-                    "-c:a", "copy", str(seg_con_titulo)
-                ]
-                subprocess.run(cmd, capture_output=True)
-                segmentos[0] = str(seg_con_titulo)
+        # 1. Intro con título
+        if guion and "titulo" in guion:
+            intro = crear_intro(guion["titulo"], plantilla, duracion=4)
+            clips_finales.append(intro)
 
-        # Unir segmentos con transiciones de fundido (xfade)
-        # Si hay más de un segmento, usar xfade; de lo contrario copiar directamente
-        if len(segmentos) > 1:
-            # Construir lista de inputs y filtros
+        # 2. Insertar imágenes/diapositivas según guion
+        if imagenes:
+            for idx, img_path in enumerate(imagenes):
+                slide = crear_diapositiva_imagen(img_path, duracion=3)
+                clips_finales.append(slide)
+
+        # 3. Agregar segmentos del video principal
+        clips_finales.extend(segmentos_principales)
+
+        # 4. Agregar videos extra al final (o intercalarlos)
+        if videos_extra:
+            for v_path in videos_extra:
+                clips_finales.append(v_path)
+
+        # Aplicar transiciones entre clips usando xfade
+        if len(clips_finales) > 1:
+            # Construir comando con xfade
             inputs = []
-            for s in segmentos:
-                inputs.extend(["-i", s])
-            # Crear filtros xfade encadenados
+            for clip in clips_finales:
+                inputs.extend(["-i", clip])
             filter_parts = []
             prev_label = "[0:v]"
-            for i in range(1, len(segmentos)):
-                offset = 1  # duración de transición en segundos (aproximado)
-                label_out = f"[v{i}]"
-                filter_parts.append(f"{prev_label}[{i}:v]xfade=transition=fade:duration=0.5:offset={offset}{label_out}")
-                prev_label = label_out
-            # Último label es el video final
-            video_final_filter = prev_label
-            # Audio: concatenar (simplificado)
-            # Usaremos amix para audio o simplemente copiar el primero
-            cmd = ["ffmpeg"]
-            for s in segmentos:
-                cmd.extend(["-i", s])
+            for i in range(1, len(clips_finales)):
+                out_label = f"[v{i}]"
+                # Duración de transición 0.5s, offset se maneja automáticamente con xfade
+                filter_parts.append(f"{prev_label}[{i}:v]xfade=transition=fade:duration=0.5:offset=2{out_label}")
+                prev_label = out_label
+            # Para el audio, usamos el audio del primer clip (simplificado)
             filter_complex = ";".join(filter_parts)
-            cmd.extend(["-filter_complex", filter_complex,
-                        "-map", video_final_filter,
-                        "-map", "0:a",  # audio del primer segmento (mejorable)
-                        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-                        "-c:a", "aac", "-b:a", "192k",
-                        str(OUTPUTS / f"con_transiciones_{uuid.uuid4()}.mp4")])
+            # Mapear video final y audio del primer clip
+            cmd = ["ffmpeg"]
+            for s in clips_finales:
+                cmd.extend(["-i", s])
+            cmd.extend([
+                "-filter_complex", filter_complex,
+                "-map", prev_label,
+                "-map", "0:a",  # audio del primer clip (mejorable)
+                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                "-c:a", "aac", "-b:a", "192k",
+                str(temp_dir / "video_transiciones.mp4")
+            ])
             subprocess.run(cmd, capture_output=True)
-            video_base = str(OUTPUTS / f"con_transiciones_{uuid.uuid4()}.mp4")
-            # Mover el archivo resultante
-            # Nota: el comando anterior genera un archivo con nombre único, pero no lo capturamos bien.
-            # Vamos a simplificar: usar concat normal por ahora, y luego aplicar un fade global de entrada/salida.
-            # Esta parte es compleja, la dejamos como concatenación simple con fade in/out global.
-            video_base = temp_dir / "video_base.mp4"
-            # Concatenar normal
-            lista = temp_dir / "lista.txt"
-            with open(lista, 'w') as f:
-                for s in segmentos:
-                    f.write(f"file '{s}'\n")
-            subprocess.run(["ffmpeg", "-f", "concat", "-safe", "0", "-i", str(lista),
-                            "-c", "copy", str(video_base)], capture_output=True)
-            # Aplicar fade in/out global
-            fade_video = temp_dir / "video_fade.mp4"
-            subprocess.run(["ffmpeg", "-i", str(video_base),
-                            "-vf", "fade=t=in:st=0:d=0.5,fade=t=out:st=8:d=0.5",
-                            "-c:a", "copy", str(fade_video)], capture_output=True)
-            video_base = fade_video
+            video_base = str(temp_dir / "video_transiciones.mp4")
         else:
-            # Un solo segmento
-            video_base = OUTPUTS / f"base_{uuid.uuid4()}.mp4"
-            subprocess.run(["ffmpeg", "-i", segmentos[0], "-c", "copy", str(video_base)], capture_output=True)
+            # Solo un clip
+            video_base = clips_finales[0]
 
-        # Insertar imágenes generadas en puntos específicos (si existen)
-        # (Se insertan al principio si hay alguna)
-        if imagenes_generadas:
-            # Tomar la primera imagen generada y ponerla al inicio
-            primera_imagen = imagenes_generadas[0][1]
-            lista_final = temp_dir / "lista_final.txt"
-            with open(lista_final, 'w') as f:
-                f.write(f"file '{primera_imagen}'\n")
-                f.write(f"file '{video_base}'\n")
-            video_con_imagen = OUTPUTS / f"video_con_imagen_{uuid.uuid4()}.mp4"
-            subprocess.run(["ffmpeg", "-f", "concat", "-safe", "0", "-i", str(lista_final),
-                            "-c", "copy", str(video_con_imagen)], capture_output=True)
-            video_base = video_con_imagen
+        # Mezclar audio de música si se proporciona
+        if audio_musica:
+            video_con_musica = temp_dir / "video_con_musica.mp4"
+            cmd = [
+                "ffmpeg", "-i", video_base, "-i", audio_musica,
+                "-filter_complex", "[1:a]volume=0.2[musica];[0:a][musica]amix=inputs=2:duration=first[aout]",
+                "-map", "0:v", "-map", "[aout]",
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                str(video_con_musica)
+            ]
+            subprocess.run(cmd, capture_output=True)
+            video_base = str(video_con_musica)
 
-        # Generar subtítulos
-        srt_content = ""
-        for i, segm in enumerate(transcripcion["segments"], 1):
-            def f_t(s):
-                h = int(s // 3600); m = int((s % 3600) // 60); sec = int(s % 60); ms = int((s - int(s)) * 1000)
-                return f"{h:02d}:{m:02d}:{sec:02d},{ms:03d}"
-            srt_content += f"{i}\n{f_t(segm['start'])} --> {f_t(segm['end'])}\n{segm['text'].strip()}\n\n"
-        ruta_srt = OUTPUTS / f"subtitulos_{uuid.uuid4()}.srt"
-        with open(ruta_srt, 'w', encoding='utf-8') as f:
-            f.write(srt_content)
+        # Generar subtítulos quemados
+        if transcripcion and "segments" in transcripcion:
+            srt_content = ""
+            for i, segm in enumerate(transcripcion["segments"], 1):
+                def f_t(s):
+                    h = int(s // 3600); m = int((s % 3600) // 60); sec = int(s % 60); ms = int((s - int(s)) * 1000)
+                    return f"{h:02d}:{m:02d}:{sec:02d},{ms:03d}"
+                srt_content += f"{i}\n{f_t(segm['start'])} --> {f_t(segm['end'])}\n{segm['text'].strip()}\n\n"
+            ruta_srt = OUTPUTS / f"subtitulos_{uuid.uuid4()}.srt"
+            with open(ruta_srt, 'w', encoding='utf-8') as f:
+                f.write(srt_content)
+
+            # Quemar subtítulos usando drawtext con estilo de plantilla
+            color_sub = plantilla.get("color_secundario", "white")
+            # Construir filtro de subtítulos aproximado (simplificado)
+            video_con_sub = temp_dir / "video_con_sub.mp4"
+            # Usar el archivo SRT con ffmpeg subtitles
+            cmd = [
+                "ffmpeg", "-i", video_base,
+                "-vf", f"subtitles={ruta_srt}:force_style='FontName=DejaVu Sans,FontSize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1'",
+                "-c:a", "copy",
+                str(video_con_sub)
+            ]
+            subprocess.run(cmd, capture_output=True)
+            video_base = str(video_con_sub)
 
         # Exportar versiones para plataformas
         formatos = {}
+        # YouTube 16:9
         yt = OUTPUTS / f"youtube_{uuid.uuid4()}.mp4"
-        subprocess.run(["ffmpeg", "-i", str(video_base), "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2", "-c:a", "copy", str(yt)], capture_output=True)
+        subprocess.run(["ffmpeg", "-i", video_base, "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2", "-c:a", "copy", str(yt)], capture_output=True)
         formatos["youtube"] = str(yt)
+        # TikTok 9:16
         tk = OUTPUTS / f"tiktok_{uuid.uuid4()}.mp4"
-        subprocess.run(["ffmpeg", "-i", str(video_base), "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2", "-c:a", "copy", str(tk)], capture_output=True)
+        subprocess.run(["ffmpeg", "-i", video_base, "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2", "-c:a", "copy", str(tk)], capture_output=True)
         formatos["tiktok"] = str(tk)
+        # Instagram 1:1
         ig = OUTPUTS / f"instagram_{uuid.uuid4()}.mp4"
-        subprocess.run(["ffmpeg", "-i", str(video_base), "-vf", "scale=1080:1080:force_original_aspect_ratio=decrease,pad=1080:1080:(ow-iw)/2:(oh-ih)/2", "-c:a", "copy", str(ig)], capture_output=True)
+        subprocess.run(["ffmpeg", "-i", video_base, "-vf", "scale=1080:1080:force_original_aspect_ratio=decrease,pad=1080:1080:(ow-iw)/2:(oh-ih)/2", "-c:a", "copy", str(ig)], capture_output=True)
         formatos["instagram"] = str(ig)
 
         return {
-            "video_final": str(video_base),
+            "video_final": video_base,
             "formatos": formatos,
             "subtitulos": str(ruta_srt),
             "transcripcion": transcripcion["text"],
-            "segmentos": len(segmentos)
+            "segmentos": len(segmentos_principales)
         }
     except Exception as e:
         return {"error": str(e)}
 
-# ============ PLANTILLAS PROFESIONALES PREDEFINIDAS ============
+# ============ PLANTILLAS PROFESIONALES MEJORADAS ============
 PLANTILLAS_PREDEF = [
     {"id": "moderno", "nombre": "Moderno", "color_primario": "#3B82F6", "color_secundario": "#1E293B",
-     "fuente": "Inter", "estilo": "minimalista", "transicion": "fade", "descripcion": "Limpio, tecnológico, ideal para tutoriales y tech."},
+     "fuente": "Inter", "estilo": "minimalista", "transicion": "fade", "descripcion": "Limpio, tecnológico, ideal para tutoriales y tech.",
+     "fondo_intro": "#3B82F6", "color_texto": "#FFFFFF", "color_sub": "#1E293B"},
     {"id": "corporativo", "nombre": "Corporativo", "color_primario": "#0F172A", "color_secundario": "#F59E0B",
-     "fuente": "Montserrat", "estilo": "elegante", "transicion": "slide", "descripcion": "Serio, profesional, para empresas."},
+     "fuente": "Montserrat", "estilo": "elegante", "transicion": "slide", "descripcion": "Serio, profesional, para empresas.",
+     "fondo_intro": "#0F172A", "color_texto": "#FFFFFF", "color_sub": "#F59E0B"},
     {"id": "publicitario", "nombre": "Publicitario", "color_primario": "#EF4444", "color_secundario": "#FACC15",
-     "fuente": "Poppins", "estilo": "impactante", "transicion": "zoom", "descripcion": "Atrevido, llamativo, para anuncios."},
+     "fuente": "Poppins", "estilo": "impactante", "transicion": "zoom", "descripcion": "Atrevido, llamativo, para anuncios.",
+     "fondo_intro": "#EF4444", "color_texto": "#FFFFFF", "color_sub": "#FACC15"},
     {"id": "institucional", "nombre": "Institucional", "color_primario": "#0369A1", "color_secundario": "#B45309",
-     "fuente": "Lato", "estilo": "formal", "transicion": "fade", "descripcion": "Sobrio, informativo, para organizaciones."}
+     "fuente": "Lato", "estilo": "formal", "transicion": "fade", "descripcion": "Sobrio, informativo, para organizaciones.",
+     "fondo_intro": "#0369A1", "color_texto": "#FFFFFF", "color_sub": "#B45309"}
 ]
 
-# ============ INTERFAZ PRINCIPAL ============
+# ============ INTERFAZ PRINCIPAL (CON CSS MODERNO) ============
+st.markdown("""
+<style>
+    .stApp {
+        background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+        color: white;
+    }
+    .stButton>button {
+        background-color: #3B82F6;
+        color: white;
+        border-radius: 10px;
+        padding: 10px 20px;
+        font-weight: bold;
+        border: none;
+        transition: all 0.3s;
+    }
+    .stButton>button:hover {
+        background-color: #2563EB;
+        transform: translateY(-2px);
+        box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+    }
+    .stFileUploader>div>div>div>div {
+        background-color: #1e293b;
+        border: 2px dashed #3B82F6;
+        border-radius: 15px;
+    }
+    .plantilla-card {
+        background-color: #1e293b;
+        border-radius: 15px;
+        padding: 20px;
+        margin: 10px 0;
+        border: 1px solid #334155;
+        transition: all 0.3s;
+    }
+    .plantilla-card:hover {
+        border-color: #3B82F6;
+        box-shadow: 0 8px 16px rgba(0,0,0,0.5);
+        transform: translateY(-5px);
+    }
+    h1, h2, h3, h4, h5, h6 {
+        color: #F8FAFC;
+    }
+    .stMarkdown p, .stMarkdown li {
+        color: #CBD5E1;
+    }
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 10px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        background-color: #1e293b;
+        border-radius: 10px 10px 0 0;
+        padding: 10px 20px;
+        color: #CBD5E1;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #3B82F6 !important;
+        color: white !important;
+    }
+    .metric-card {
+        background-color: #1e293b;
+        border-radius: 10px;
+        padding: 15px;
+        text-align: center;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 def main():
     if 'usuario' not in st.session_state:
         st.session_state.usuario = None
@@ -473,13 +549,22 @@ def main():
                 tipo_contenido = st.selectbox("Tipo de contenido", ["Publicitario", "Institucional", "Educativo", "Entretenimiento", "Tutorial", "Vlog"])
                 duracion_objetivo = st.slider("Duración aproximada (minutos)", 1, 15, 3)
 
-                # Paso 3: Plantilla
+                # Paso 3: Plantilla con vista previa
                 st.subheader("3. Elige una plantilla profesional")
                 cols = st.columns(2)
                 for i, plant in enumerate(PLANTILLAS_PREDEF):
                     with cols[i % 2]:
-                        st.markdown(f"**{plant['nombre']}**")
-                        st.markdown(f"Color: <span style='color:{plant['color_primario']}'>⬤</span> {plant['color_primario']} | {plant['descripcion']}", unsafe_allow_html=True)
+                        st.markdown(f"""
+                        <div class="plantilla-card">
+                            <h3 style="color:{plant['color_primario']};">{plant['nombre']}</h3>
+                            <p>Color primario: {plant['color_primario']} | Secundario: {plant['color_secundario']}</p>
+                            <p>Fuente: {plant['fuente']} | Estilo: {plant['estilo']}</p>
+                            <p>{plant['descripcion']}</p>
+                            <div style="background-color:{plant['color_primario']}; padding:10px; border-radius:5px; color:{plant['color_texto']}; font-family:{plant['fuente']};">
+                                Vista previa de texto
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
                         if st.button(f"Usar {plant['nombre']}", key=f"plant_{plant['id']}"):
                             st.session_state.plantilla_elegida = plant
                             st.success(f"Plantilla {plant['nombre']} seleccionada")
@@ -498,7 +583,7 @@ def main():
                         with st.spinner("Generando guion profesional..."):
                             db = cargar_db()
                             groq = GroqAI(db["config"]["groq_api_key"], model=db["config"].get("groq_model", "llama-3.1-70b-versatile"))
-                            material_desc = f"Videos: {video_principal.name if video_principal else 'no'}, Imágenes: {len(imagenes) if imagenes else 0}, Audio: {'sí' if audio_musica else 'no'}"
+                            material_desc = f"Videos: {video_principal.name if video_principal else 'no'}, Videos extra: {len(videos_extra) if videos_extra else 0}, Imágenes: {len(imagenes) if imagenes else 0}, Audio: {'sí' if audio_musica else 'no'}"
                             guion = groq.generar_guion(texto_objetivo, tipo_contenido, duracion_objetivo, material_desc)
                             if "error" in guion:
                                 st.error(f"Error al generar guion: {guion['error']}")
@@ -527,13 +612,25 @@ def main():
                             with open(ruta_video, 'wb') as f:
                                 f.write(video_principal.getbuffer())
 
-                            archivos_extra = []
+                            # Guardar archivos extra
+                            archivos_extra = {"videos": [], "imagenes": [], "audio": None}
+                            if videos_extra:
+                                for v in videos_extra:
+                                    ruta_v = UPLOADS / f"{timestamp}_{v.name}"
+                                    with open(ruta_v, 'wb') as f:
+                                        f.write(v.getbuffer())
+                                    archivos_extra["videos"].append(str(ruta_v))
                             if imagenes:
                                 for img in imagenes:
                                     ruta_img = UPLOADS / f"{timestamp}_{img.name}"
                                     with open(ruta_img, 'wb') as f:
                                         f.write(img.getbuffer())
-                                    archivos_extra.append(str(ruta_img))
+                                    archivos_extra["imagenes"].append(str(ruta_img))
+                            if audio_musica:
+                                ruta_audio = UPLOADS / f"{timestamp}_{audio_musica.name}"
+                                with open(ruta_audio, 'wb') as f:
+                                    f.write(audio_musica.getbuffer())
+                                archivos_extra["audio"] = str(ruta_audio)
 
                             config = {"whisper_model": "base"}
                             resultado = procesar_video_pro(str(ruta_video), st.session_state.guion if 'guion' in st.session_state else None,
@@ -572,12 +669,12 @@ def main():
                 st.markdown(f"Color primario: {plant['color_primario']} | Secundario: {plant['color_secundario']}")
                 st.markdown(f"Fuente: {plant['fuente']} | Estilo: {plant['estilo']} | Transición: {plant['transicion']}")
                 st.markdown(plant['descripcion'])
-                # Vista previa visual con HTML
+                # Vista previa visual mejorada
                 st.markdown(f"""
-                <div style="background-color:{plant['color_primario']}; padding:20px; border-radius:10px; color:white;">
+                <div style="background-color:{plant['fondo_intro']}; padding:20px; border-radius:15px; color:{plant['color_texto']}; margin:10px 0; box-shadow:0 4px 6px rgba(0,0,0,0.5);">
                     <h2 style="font-family:{plant['fuente']};">{plant['nombre']}</h2>
-                    <p style="font-family:{plant['fuente']};">Este es un ejemplo de cómo se vería el texto con la plantilla.</p>
-                    <span style="background-color:{plant['color_secundario']}; padding:5px 10px; border-radius:5px;">Botón de ejemplo</span>
+                    <p style="font-family:{plant['fuente']};">Ejemplo de cómo se vería el texto con esta plantilla.</p>
+                    <span style="background-color:{plant['color_secundario']}; padding:5px 15px; border-radius:20px; color:white;">Botón de ejemplo</span>
                 </div>
                 """, unsafe_allow_html=True)
                 st.markdown("---")
@@ -593,11 +690,9 @@ def main():
         elif vista == "⚙️ Configuración":
             st.title("⚙️ Configuración")
             st.json(st.session_state.usuario)
-            # Botón para actualizar membresía
             st.markdown("---")
             st.subheader("💳 Actualizar Membresía")
             if st.button("Actualizar a Pro (19.99/mes)"):
-                # Enlace a PayPal (debes reemplazar con tu enlace de pago)
                 st.markdown("[Haz clic aquí para pagar con PayPal](https://www.paypal.com/paypalme/tu-cuenta)")
 
 # ============ ADMINISTRADOR ============
